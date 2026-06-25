@@ -1,0 +1,13 @@
+# Runtime outputs — Code Ocean regenerates /results on each run; never commit.
+results/*
+!results/.gitkeep
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Regenerated on import by ndx_change_detection_task/__init__.py
+code/ndx_change_detection_task/_specs/
+
+# OS cruft
+.DS_Store

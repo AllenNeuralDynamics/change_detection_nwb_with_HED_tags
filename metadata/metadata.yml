@@ -1,0 +1,20 @@
+metadata_version: 1
+name: Change-detection NWB + HED packaging
+description: >
+  Converts a raw camstim change-detection behavior session (a *_stim.pkl
+  and its *_sync.h5) into a HED-annotated NWB file plus a BIDS-style
+  events sidecar JSON. Timestamps are aligned to the sync-file hardware
+  clock (monitor delay applied only to visual events). Output contains an
+  ndx-events EventsTable for point events (licks, rewards, image change,
+  omissions), TimeIntervals tables for stimulus presentations / movie
+  frames / trials / epochs, and task parameters via a custom
+  ndx-change-detection-task LabMetaData extension. QC and validation
+  plots are produced by a separate downstream capsule.
+tags:
+  - neuroscience
+  - NWB
+  - HED
+  - change-detection
+  - behavior
+authors:
+  - name: Marina Garrett
