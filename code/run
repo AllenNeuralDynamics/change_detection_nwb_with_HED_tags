@@ -1,51 +1,5 @@
 #!/usr/bin/env bash
-# Code Ocean entry point.
-#
-# Discovers every session under /data (any subfolder, or /data itself,
-# containing exactly one *_stim.pkl and one *_sync.h5) and packages each
-# into an NWB file + BIDS-style events sidecar JSON written to /results.
-#
-# Output naming: <id>.nwb and <id>.events.json, where <id> is the stim
-# pkl filename with the trailing "_stim" removed (e.g. 1464696201_stim.pkl
-# -> 1464696201.nwb).
-set -euo pipefail
+set -ex
 
-DATA_DIR="${DATA_DIR:-/data}"
-RESULTS_DIR="${RESULTS_DIR:-/results}"
-CODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-mkdir -p "$RESULTS_DIR"
-
-# Find every directory holding a *_stim.pkl (search /data recursively).
-mapfile -t PKL_FILES < <(find "$DATA_DIR" -type f -name '*_stim.pkl' | sort)
-
-if [ "${#PKL_FILES[@]}" -eq 0 ]; then
-    echo "ERROR: no *_stim.pkl found under $DATA_DIR" >&2
-    exit 1
-fi
-
-echo "Found ${#PKL_FILES[@]} session(s) to package."
-
-for PKL in "${PKL_FILES[@]}"; do
-    SESSION_DIR="$(dirname "$PKL")"
-    STEM="$(basename "$PKL" _stim.pkl)"
-
-    # Locate the matching sync file in the same directory.
-    SYNC="$(find "$SESSION_DIR" -maxdepth 1 -type f -name '*_sync.h5' | head -n1)"
-    if [ -z "$SYNC" ]; then
-        echo "WARNING: no *_sync.h5 next to $PKL — skipping." >&2
-        continue
-    fi
-
-    OUT="$RESULTS_DIR/${STEM}.nwb"
-    echo "=============================================================="
-    echo "Packaging session $STEM"
-    echo "  pkl  : $PKL"
-    echo "  sync : $SYNC"
-    echo "  out  : $OUT"
-    echo "=============================================================="
-    python "$CODE_DIR/package_to_nwb.py" "$PKL" "$SYNC" "$OUT"
-done
-
-echo "All sessions packaged. Results in $RESULTS_DIR:"
-ls -lh "$RESULTS_DIR"
+# This is the master script for the capsule. When you click "Reproducible Run", the code in this file will execute.
+python -u run_capsule.py "$@"

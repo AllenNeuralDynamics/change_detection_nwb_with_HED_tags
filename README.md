@@ -21,39 +21,43 @@ For each session it writes to `/results`:
 ## Layout
 
 ```
-code/        pipeline + entry point (`run`) + test notebook
-  run                          bash entry point (Code Ocean runs this)
-  package_to_nwb.py            Stage 2: builds NWB tables, writes file + sidecar
+code/        pipeline + entry points + test notebook
+  run                           CO master script (runs `python -u run_capsule.py`)
+  run_capsule.py                entry logic: finds sessions in /data, packages each
+  package_to_nwb.py             Stage 2: builds NWB tables, writes file + sidecar
   build_events_and_intervals.py Stage 1: pkl + sync -> events_df / intervals_df
-  task_parameters.py           task-parameter LabMetaData builder
-  ndx_change_detection_task/   custom NWB extension (task parameters)
-  test_nwb_output.ipynb        loads a packaged NWB and inspects the tables
-data/        embedded test sessions (mounted read-only at /data)
+  task_parameters.py            task-parameter LabMetaData builder
+  ndx_change_detection_task/    custom NWB extension (task parameters)
+  test_nwb_output.ipynb         loads a packaged NWB and inspects the tables
+data/        test sessions (mounted read-only at /data)
   new_ophys_mfish_data/  1464696201_stim.pkl + _sync.h5
   old_vbo_data/          1050231786_stim.pkl + _sync.h5
-environment/ Dockerfile (pinned dependency versions)
+environment/ Dockerfile (Code Ocean base image + dependencies)
 metadata/    metadata.yml
 results/     outputs land here
 ```
 
-## How `run` finds sessions
+## How sessions are discovered
 
-`run` searches `/data` recursively for every `*_stim.pkl`, pairs each with
-the `*_sync.h5` in the same folder, and packages it to `/results/<id>.nwb`
-(`<id>` = the pkl filename minus `_stim`). Drop a new session folder into
-`/data` and it will be packaged with no code changes.
+`run_capsule.py` searches `/data` recursively for every `*_stim.pkl`, pairs
+each with the `*_sync.h5` in the same folder, and packages it to
+`/results/<id>.nwb` (`<id>` = the pkl filename minus `_stim`). Drop a new
+session folder into `/data` and it is packaged with no code changes.
 
 ## Run locally (outside Code Ocean)
 
 ```bash
-DATA_DIR=./data RESULTS_DIR=./results bash code/run
+cd code
+DATA_DIR=../data RESULTS_DIR=../results python run_capsule.py
 ```
 
-## Pinned environment
+## Environment
 
-Python 3.10 with: numpy 2.2.6, pandas 2.3.3, scipy 1.15.3, h5py 3.16.0,
-six 1.17.0, pynwb 3.1.3, hdmf 4.3.1, ndx-events 0.4.0, ndx-hed 0.2.0,
-hedtools 1.1.0. See `environment/Dockerfile`.
+Requires **Python ≥ 3.10** (the `ndx-hed` 0.2.0 dependency does not support
+3.9). Validated dependency stack: numpy 2.2.6, pandas 2.3.3, scipy 1.15.3,
+h5py 3.16.0, six 1.17.0, pynwb 3.1.3, hdmf 4.3.1, ndx-events 0.4.0,
+ndx-hed 0.2.0, hedtools 1.1.0. Set the Python version and packages via the
+Code Ocean Environment editor (see `environment/Dockerfile`).
 
 ## Notes
 
