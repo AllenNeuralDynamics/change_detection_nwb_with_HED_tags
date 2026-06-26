@@ -1,0 +1,105 @@
+{
+	"version": 1,
+	"attached_datasets": [
+		{
+			"id": "0d581143-96cc-4512-9577-464ee89e3487",
+			"mount": "multiplane-ophys_790322_2025-07-10_15-25-55"
+		},
+		{
+			"id": "28d7c607-4040-4aa8-a318-8d0e050c1442",
+			"mount": "multiplane-ophys_790322_2025-06-25_14-02-09"
+		},
+		{
+			"id": "3471884e-8823-42cf-b98b-e918dca26473",
+			"mount": "multiplane-ophys_790322_2025-06-11_15-09-29"
+		},
+		{
+			"id": "37e0fe46-1c6f-4161-8cea-9243efe66c44",
+			"mount": "multiplane-ophys_790322_2025-08-07_10-13-27"
+		},
+		{
+			"id": "37f316ac-88de-428d-aed4-18fe2ad2537e",
+			"mount": "multiplane-ophys_790322_2025-07-02_14-00-54"
+		},
+		{
+			"id": "3c1578d0-aa9f-4c1c-98ae-c6ac5a25c7c4",
+			"mount": "multiplane-ophys_790322_2025-08-13_10-27-05"
+		},
+		{
+			"id": "4914fe91-5cd8-4e45-898f-071c6c03a8e6",
+			"mount": "multiplane-ophys_790322_2025-06-26_14-34-26"
+		},
+		{
+			"id": "5b757624-7777-4bd3-861d-73d1c9eb22d3",
+			"mount": "multiplane-ophys_790322_2025-06-12_15-23-11"
+		},
+		{
+			"id": "64e5be7f-23d3-4d86-ace1-15c65b1af097",
+			"mount": "multiplane-ophys_790322_2025-07-03_14-03-48"
+		},
+		{
+			"id": "665dbcd2-7378-4db2-a58b-c7f8c62284e3",
+			"mount": "multiplane-ophys_790322_2025-06-23_12-18-18"
+		},
+		{
+			"id": "7a52a86b-2b7e-454e-8169-47841575da5e",
+			"mount": "multiplane-ophys_790322_2025-06-24_12-14-55"
+		},
+		{
+			"id": "7aa24e03-68b0-4538-94d0-b4c58cbf0e62",
+			"mount": "multiplane-ophys_790322_2025-07-07_12-19-54"
+		},
+		{
+			"id": "9632b510-19a0-4364-9f10-80dc16261a46",
+			"mount": "multiplane-ophys_790322_2025-08-06_09-43-14"
+		},
+		{
+			"id": "98912eb1-8cdf-4672-b10e-75f88027c27d",
+			"mount": "multiplane-ophys_790322_2025-07-11_14-33-34"
+		},
+		{
+			"id": "a245953c-1b6e-4566-8af4-464f678cf3e8",
+			"mount": "multiplane-ophys_790322_2025-06-30_11-27-24"
+		},
+		{
+			"id": "a32d1e33-b7f7-45ad-bd5e-5bfb5c51c545",
+			"mount": "multiplane-ophys_790322_2025-08-21_09-55-07"
+		},
+		{
+			"id": "a77a2368-0077-4083-8eed-2eede398f560",
+			"mount": "multiplane-ophys_790322_2025-08-05_08-54-42"
+		},
+		{
+			"id": "b3fb468d-f0bc-44e4-9efd-b9c34dd838a7",
+			"mount": "multiplane-ophys_790322_2025-06-17_15-44-27"
+		},
+		{
+			"id": "b7f201c8-db0c-4099-bc95-f55489340315",
+			"mount": "multiplane-ophys_790322_2025-06-18_14-34-44"
+		},
+		{
+			"id": "c55aa2a7-3fa5-49de-8db9-f5eef639a01c",
+			"mount": "multiplane-ophys_790322_2025-07-12_10-41-51"
+		},
+		{
+			"id": "ca3140c3-2a63-4176-b9d0-c109ea830d36",
+			"mount": "multiplane-ophys_790322_2025-06-16_12-24-56"
+		},
+		{
+			"id": "ce8b91f7-e040-4a1b-8574-d838babac535",
+			"mount": "multiplane-ophys_790322_2025-08-02_12-29-52"
+		},
+		{
+			"id": "dbf44be1-1f96-4e1b-9525-257f7c217314",
+			"mount": "multiplane-ophys_790322_2025-06-13_14-57-49"
+		},
+		{
+			"id": "eb498f88-55a5-4507-b714-f0793f2f9b87",
+			"mount": "multiplane-ophys_790322_2025-07-08_12-35-46"
+		},
+		{
+			"id": "f2a48632-5170-436d-b732-7e998b8babc5",
+			"mount": "multiplane-ophys_790322_2025-07-01_13-35-26"
+		}
+	]
+}

@@ -109,6 +109,8 @@ def nwb_to_dfs(nwb) -> tuple[pd.DataFrame, pd.DataFrame]:
         'trials_id': et_df['trials_id'].astype(int).values,
         'stimulus_presentations_id': et_df['stimulus_presentations_id'].astype(int).values,
         'image_name': et_df['image_name'].replace('', np.nan).values,
+        'orientation': (et_df['orientation'].values
+                        if 'orientation' in et_df.columns else np.nan),
         'frame': et_df['frame'].replace(-1, np.nan).values,
         'lick_latency': np.nan,  # recomputed below for lick rows
         'reward_volume': et_df['reward_volume'].values,
@@ -127,6 +129,8 @@ def nwb_to_dfs(nwb) -> tuple[pd.DataFrame, pd.DataFrame]:
         'trials_id': flashes['trials_id'].astype(int).values,
         'stimulus_presentations_id': flashes['stimulus_presentations_id'].astype(int).values,
         'image_name': flashes['image_name'].values,
+        'orientation': (flashes['orientation'].values
+                        if 'orientation' in flashes.columns else np.nan),
         'frame': flashes['start_frame'].astype(float).values,
         'lick_latency': np.nan, 'reward_volume': np.nan,
         'movie_frame_index': np.nan, 'movie_repeat': np.nan,
@@ -138,6 +142,8 @@ def nwb_to_dfs(nwb) -> tuple[pd.DataFrame, pd.DataFrame]:
         'trials_id': flashes['trials_id'].astype(int).values,
         'stimulus_presentations_id': flashes['stimulus_presentations_id'].astype(int).values,
         'image_name': flashes['image_name'].values,
+        'orientation': (flashes['orientation'].values
+                        if 'orientation' in flashes.columns else np.nan),
         'frame': flashes['stop_frame'].astype(float).values,
         'lick_latency': np.nan, 'reward_volume': np.nan,
         'movie_frame_index': np.nan, 'movie_repeat': np.nan,
@@ -152,6 +158,7 @@ def nwb_to_dfs(nwb) -> tuple[pd.DataFrame, pd.DataFrame]:
             'event_type': 'movie_onset',
             'trials_id': -1, 'stimulus_presentations_id': -1,
             'image_name': 'natural_movie_one',
+            'orientation': np.nan,
             'frame': nm_df['start_frame'].astype(float).values,
             'lick_latency': np.nan, 'reward_volume': np.nan,
             'movie_frame_index': nm_df['movie_frame_index'].astype(float).values,
@@ -163,6 +170,7 @@ def nwb_to_dfs(nwb) -> tuple[pd.DataFrame, pd.DataFrame]:
             'event_type': 'movie_offset',
             'trials_id': -1, 'stimulus_presentations_id': -1,
             'image_name': np.nan,
+            'orientation': np.nan,
             'frame': nm_df['stop_frame'].astype(float).values,
             'lick_latency': np.nan, 'reward_volume': np.nan,
             'movie_frame_index': nm_df['movie_frame_index'].astype(float).values,
@@ -198,7 +206,8 @@ def nwb_to_dfs(nwb) -> tuple[pd.DataFrame, pd.DataFrame]:
     trials_df = nwb.trials.to_dataframe()
     annot_cols = ['go', 'catch', 'auto_rewarded', 'aborted', 'hit', 'miss',
                   'false_alarm', 'correct_reject', 'change_time', 'change_frame',
-                  'initial_image_name', 'change_image_name', 'reward_time',
+                  'initial_image_name', 'change_image_name',
+                  'initial_orientation', 'change_orientation', 'reward_time',
                   'reward_volume', 'response_time', 'response_latency']
     trials_annot = (trials_df[annot_cols].reset_index()
                     .rename(columns={'id': 'trials_id'}))
@@ -496,9 +505,13 @@ _VALUE_COLUMN_DESC = {
     'movie_repeat':
         'Repetition number of natural_movie_one (0-based) for this frame.',
     'image_name':
-        'Identifier of the image presented (e.g., "im065"), or '
-        '"natural_movie_one" for movie frames, or "omitted" for withheld '
-        'flashes.',
+        'Identifier of the stimulus presented: an image name (e.g., "im065") '
+        'for natural-image sessions, "gratings_<ori>" (e.g., "gratings_90") '
+        'for gratings sessions, "natural_movie_one" for movie frames, or '
+        '"omitted" for withheld flashes.',
+    'orientation':
+        'Grating orientation in degrees for gratings-session stimulus rows. '
+        'NaN for natural-image sessions, movie frames, and omitted flashes.',
     'label':
         'Descriptive label for this row. Carries the epoch name for '
         'interval_type=epoch rows and the image_name for '
@@ -523,10 +536,19 @@ _VALUE_COLUMN_DESC = {
         '(events table) or from this stimulus onset to the next lick before '
         'the following presentation (stimulus_presentations table).',
     'initial_image_name':
-        'Image identity shown at the start of the trial (before any change).',
+        'Stimulus identity shown at the start of the trial (before any '
+        'change): image name, or "gratings_<ori>" for gratings sessions.',
     'change_image_name':
-        'Image identity shown after the change. Equal to initial_image_name '
-        'for catch / aborted trials where no change occurred.',
+        'Stimulus identity shown after the change. Equal to '
+        'initial_image_name for catch / aborted trials where no change '
+        'occurred.',
+    'initial_orientation':
+        'Grating orientation in degrees at the start of the trial. NaN for '
+        'natural-image sessions.',
+    'change_orientation':
+        'Grating orientation in degrees after the change. Equal to '
+        'initial_orientation for catch / aborted trials. NaN for '
+        'natural-image sessions.',
     'change_window_start_time':
         'Start time of the trial\'s change window, in seconds. NaN if '
         'undefined.',
@@ -600,8 +622,11 @@ _VALUE_COLUMN_DESC = {
 def _stim_presentation_hed(image_name: str, is_change: bool, omitted: bool) -> str:
     if omitted:
         return 'Sensory-event, Unexpected, Label/omitted_flash'
+    # Gratings sessions label presentations "gratings_<ori>" and use the
+    # Grating visual-object tag; natural-image sessions use Image.
+    obj_tag = 'Grating' if str(image_name).startswith('gratings_') else 'Image'
     base = (f'Sensory-event, Visual-presentation, '
-            f'(Image, Label/{image_name})')
+            f'({obj_tag}, Label/{image_name})')
     if is_change:
         base += ', Target'
     return base
@@ -875,8 +900,9 @@ def build_stimulus_presentations(
         off_f = int(offset_frames_by_sid.get(sid, on_f + 15))
         is_change = sid in change_sids
         tid = int(row['trials_id']) if pd.notna(row['trials_id']) else -1
+        ori = float(row['orientation']) if pd.notna(row.get('orientation')) else np.nan
         rows.append((on_t, off_t, str(row['image_name']), is_change, False,
-                     sid, tid, on_f, off_f))
+                     sid, tid, on_f, off_f, ori))
     for _, row in omitted.iterrows():
         sid = (int(row['stimulus_presentations_id'])
                if pd.notna(row['stimulus_presentations_id']) else -1)
@@ -885,7 +911,7 @@ def build_stimulus_presentations(
         tid = int(row['trials_id']) if pd.notna(row['trials_id']) else -1
         # Omitted slot: synthetic 250ms / 15-frame duration
         rows.append((on_t, on_t + 0.25, 'omitted', False, True, sid, tid,
-                     on_f, on_f + 15))
+                     on_f, on_f + 15, np.nan))
     rows.sort(key=lambda r: r[0])
 
     start_time = [r[0] for r in rows]
@@ -897,6 +923,7 @@ def build_stimulus_presentations(
     tids = [r[6] for r in rows]
     start_frames = [r[7] for r in rows]
     stop_frames = [r[8] for r in rows]
+    orientation = [r[9] for r in rows]
     hed = [_stim_presentation_hed(n, c, o)
            for n, c, o in zip(image_name, is_change, omitted_flag)]
     epoch_names = ([epoch_name_at(t, epoch_list) for t in start_time]
@@ -932,8 +959,15 @@ def build_stimulus_presentations(
                        data=start_time),
             VectorData(name='stop_time', description='Flash offset (s).',
                        data=stop_time),
-            VectorData(name='image_name', description='Image identity, or "omitted".',
+            VectorData(name='image_name',
+                       description='Stimulus identity: image name for natural-image '
+                                   'sessions, "gratings_<ori>" for gratings sessions, '
+                                   'or "omitted".',
                        data=image_name),
+            VectorData(name='orientation',
+                       description='Grating orientation in degrees (NaN for '
+                                   'natural-image and omitted presentations).',
+                       data=orientation),
             VectorData(name='is_change',
                        description='True if image identity differs from the '
                                    'previous (non-omitted) flash.',
@@ -1053,8 +1087,14 @@ def add_trials(
         ('warm_up', 'True for the first N warm-up trials.'),
         ('change_time', 'Time of image change on this trial (NaN if no change).'),
         ('change_frame', 'Frame index of change (-1 if no change).'),
-        ('initial_image_name', 'Image shown at trial start.'),
-        ('change_image_name', 'Image shown after change (same as initial if catch/abort).'),
+        ('initial_image_name', 'Stimulus shown at trial start (image name, or '
+                               '"gratings_<ori>" for gratings sessions).'),
+        ('change_image_name', 'Stimulus shown after change (same as initial if '
+                              'catch/abort).'),
+        ('initial_orientation', 'Grating orientation (deg) at trial start '
+                                '(NaN for natural-image sessions).'),
+        ('change_orientation', 'Grating orientation (deg) after change '
+                               '(NaN for natural-image sessions).'),
         ('reward_time', 'Time of reward delivery (NaN if none).'),
         ('reward_volume', 'Volume of reward delivered (mL).'),
         ('response_time', 'Time of first lick after change (NaN if none).'),
@@ -1091,6 +1131,8 @@ def add_trials(
             change_frame=int(row['change_frame']) if pd.notna(row['change_frame']) else -1,
             initial_image_name=str(row['initial_image_name']) if pd.notna(row['initial_image_name']) else '',
             change_image_name=str(row['change_image_name']) if pd.notna(row['change_image_name']) else '',
+            initial_orientation=float(row['initial_orientation']) if pd.notna(row.get('initial_orientation')) else np.nan,
+            change_orientation=float(row['change_orientation']) if pd.notna(row.get('change_orientation')) else np.nan,
             reward_time=float(row['reward_time']) if pd.notna(row['reward_time']) else np.nan,
             reward_volume=float(row['reward_volume']) if pd.notna(row['reward_volume']) else 0.0,
             response_time=float(row['response_time']) if pd.notna(row['response_time']) else np.nan,
@@ -1313,7 +1355,12 @@ def build_events_table(events_df: pd.DataFrame) -> tuple[EventsTable, list[Meani
     et.add_column(name='stimulus_presentations_id',
                   description='Id of stimulus presentation (-1 if none).')
     et.add_column(name='image_name',
-                  description='Image name (for image-related events; empty otherwise).')
+                  description='Stimulus identity for stimulus events: image name '
+                              '(natural-image sessions) or "gratings_<ori>" '
+                              '(gratings sessions); empty otherwise.')
+    et.add_column(name='orientation',
+                  description='Grating orientation in degrees for gratings stimulus '
+                              'events (NaN otherwise).')
     et.add_column(name='frame',
                   description='Vsync falling-edge frame index (-1 if N/A).')
     et.add_column(name='reward_volume',
@@ -1332,6 +1379,9 @@ def build_events_table(events_df: pd.DataFrame) -> tuple[EventsTable, list[Meani
         [int(v) if pd.notna(v) else -1 for v in df['stimulus_presentations_id']])
     et['image_name'].data.extend(
         [str(v) if pd.notna(v) else '' for v in df['image_name']])
+    et['orientation'].data.extend(
+        [float(v) if pd.notna(v) else np.nan for v in df['orientation']]
+        if 'orientation' in df.columns else [np.nan] * n)
     et['frame'].data.extend(
         [int(v) if pd.notna(v) else -1 for v in df['frame']])
     et['reward_volume'].data.extend(

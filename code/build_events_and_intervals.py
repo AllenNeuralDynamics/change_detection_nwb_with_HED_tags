@@ -70,19 +70,67 @@ LICK_HED_FRAGMENTS = {
 }
 BOUT_START_HED_FRAGMENT = ', (Temporal-marker, Label/bout_start)'
 
+# Grating-session overrides for the stimulus HED templates above. Gratings
+# change-detection sessions present oriented gratings rather than photographs,
+# so the visual-object tag is `Grating` instead of `Photograph`. {image_name}
+# is substituted with the canonical grating label (e.g. "gratings_90").
+GRATING_HED_TAGS = {
+    'image_onset': 'Sensory-event, Visual-presentation, (Grating, Label/{image_name}), Onset',
+    'image_offset': 'Sensory-event, Visual-presentation, Offset',
+    'image_change': 'Sensory-event, Visual-presentation, (Grating, Label/{image_name}), Experimental-stimulus, Event/Change',
+    'image_omission': 'Sensory-event, Visual-presentation, Omitted-stimulus',
+}
 
-def format_hed_string(event_type, image_name=None):
+
+def format_hed_string(event_type, image_name=None, orientation=None):
     """Format HED tag string for an event, substituting image_name if needed.
 
-    Returns empty string for 'lick' and 'reward' events — their HED strings
-    are composed later by _classify_licks() and _classify_rewards().
+    For grating sessions (``orientation`` is not None/NaN), the grating-specific
+    templates are used for stimulus events. Returns empty string for 'lick' and
+    'reward' events — their HED strings are composed later by _classify_licks()
+    and _classify_rewards().
     """
     if event_type in ('lick', 'reward'):
         return ''
-    template = HED_TAGS.get(event_type, '')
+    is_grating = orientation is not None and not (
+        isinstance(orientation, float) and np.isnan(orientation))
+    tags = (GRATING_HED_TAGS if (is_grating and event_type in GRATING_HED_TAGS)
+            else HED_TAGS)
+    template = tags.get(event_type, '')
     if '{image_name}' in template and image_name:
-        return template.replace('{image_name}', image_name)
+        return template.replace('{image_name}', str(image_name))
     return template
+
+
+def get_stimulus(beh):
+    """Return ``(stim_dict, stim_type, identity_attr)`` for the session.
+
+    Change-detection sessions store the active stimulus under
+    ``beh['stimuli']`` keyed by type — ``'images'`` for natural-image sessions
+    and ``'grating'`` for gratings sessions. ``identity_attr`` is the lowercased
+    ``set_log`` attribute name that carries stimulus identity ('image' or 'ori').
+    """
+    stim = beh['stimuli']
+    if 'images' in stim:
+        return stim['images'], 'images', 'image'
+    if 'grating' in stim:
+        return stim['grating'], 'grating', 'ori'
+    raise KeyError(
+        f"Unrecognized stimulus type; expected 'images' or 'grating', "
+        f"got keys {list(stim)}")
+
+
+def stim_identity(stim_type, value):
+    """Map a raw set_log/change_log identity value to ``(image_name, orientation)``.
+
+    For natural-image sessions the identity is an image-name string and the
+    orientation is NaN. For gratings the identity is an orientation number,
+    which is rendered as a canonical ``gratings_<ori>`` label while the numeric
+    value is preserved in the ``orientation`` field.
+    """
+    if stim_type == 'grating':
+        return f'gratings_{value}', float(value)
+    return value, float('nan')
 
 
 # ===================================================================
@@ -293,7 +341,7 @@ def build_events_table(pkl, ts):
     n_frames = len(stim_ts_visual)
 
     beh = pkl['items']['behavior']
-    stimuli = beh['stimuli']['images']
+    stimuli, stim_type, identity_attr = get_stimulus(beh)
     trial_log = beh['trial_log']
     params = beh['params']
 
@@ -302,12 +350,11 @@ def build_events_table(pkl, ts):
 
     events = []
 
-    # ---- IMAGE ONSET / OFFSET ----
+    # ---- IMAGE / GRATING ONSET / OFFSET ----
     for idx, (attr_name, attr_value, _time, frame) in enumerate(set_log):
-        image_name = attr_value if attr_name.lower() == 'image' else None
-        orientation = attr_value if attr_name.lower() == 'ori' else None
-        if image_name is None and orientation is None:
+        if attr_name.lower() != identity_attr:
             continue
+        image_name, orientation = stim_identity(stim_type, attr_value)
 
         try:
             next_frame = set_log[idx + 1][3]
@@ -337,21 +384,28 @@ def build_events_table(pkl, ts):
                     'timestamp': onset_time,
                     'event_type': 'image_onset',
                     'image_name': image_name,
+                    'orientation': orientation,
                     'frame': ep_start - 1,
                 })
                 events.append({
                     'timestamp': offset_time,
                     'event_type': 'image_offset',
                     'image_name': image_name,
+                    'orientation': orientation,
                     'frame': ep_end - 1,
                 })
 
-    # ---- IMAGE CHANGE events from change_log ----
+    # ---- IMAGE / GRATING CHANGE events from change_log ----
+    # change_log entries are ((from_cat, from_val), (to_cat, to_val), time,
+    # frame). For images from_val/to_val are image names; for gratings they
+    # are orientation values (from_cat/to_cat are the orientation group, e.g.
+    # 'horizontal'/'vertical').
     change_log = stimuli['change_log']
     for entry in change_log:
         (from_cat, from_name), (to_cat, to_name), time_val, frame = entry
         if from_name == to_name:
             continue  # not an actual identity change
+        change_image_name, change_orientation = stim_identity(stim_type, to_name)
         # change_log frame is where the image register changes;
         # the visual onset is the next draw epoch start (frame + 1),
         # then frame-1 correction nets to using frame for timestamp.
@@ -362,7 +416,8 @@ def build_events_table(pkl, ts):
         events.append({
             'timestamp': change_ts,
             'event_type': 'image_change',
-            'image_name': to_name,
+            'image_name': change_image_name,
+            'orientation': change_orientation,
             'frame': onset_frame - 1,  # vsync edge index of change_ts
         })
 
@@ -601,7 +656,8 @@ def build_events_table(pkl, ts):
     # ---- Initial HED tags (non-lick events get final tags here;
     #      lick HED strings are composed later after classification) ----
     def _make_hed(row):
-        return format_hed_string(row['event_type'], row.get('image_name'))
+        return format_hed_string(row['event_type'], row.get('image_name'),
+                                 row.get('orientation'))
     events_df['hed_string'] = events_df.apply(_make_hed, axis=1)
 
     # ---- trials_id ----
@@ -616,15 +672,15 @@ def build_events_table(pkl, ts):
     events_df['reward_type'] = np.nan
 
     # Ensure consistent columns
-    for col in ['image_name', 'reward_volume', 'movie_frame_index',
-                'movie_repeat']:
+    for col in ['image_name', 'orientation', 'reward_volume',
+                'movie_frame_index', 'movie_repeat']:
         if col not in events_df.columns:
             events_df[col] = np.nan
 
     # Final column order
     cols = [
         'timestamp', 'event_type', 'hed_string', 'trials_id',
-        'stimulus_presentations_id', 'image_name', 'frame',
+        'stimulus_presentations_id', 'image_name', 'orientation', 'frame',
         'lick_latency', 'reward_volume',
         'movie_frame_index', 'movie_repeat',
         'lick_classification', 'bout_start', 'reward_type',
@@ -667,11 +723,18 @@ def build_intervals_table(pkl, ts, events_df):
     trial_log = beh['trial_log']
     cl_params = beh['cl_params']
     params = beh['params']
-    set_log = beh['stimuli']['images']['set_log']
+    stimuli, stim_type, identity_attr = get_stimulus(beh)
+    set_log = stimuli['set_log']
 
-    response_window = params.get('response_window', [0.15, 0.75])
-    change_flashes_min = cl_params.get('change_flashes_min', 4)
-    change_flashes_max = cl_params.get('change_flashes_max', 12)
+    response_window = params.get('response_window') or [0.15, 0.75]
+    # Flash-count change timing only applies to flashed paradigms. Continuously
+    # presented stimuli (e.g. early gratings training, periodic_flash=None) leave
+    # these as None; flash-based change windows are skipped for those sessions.
+    _cf_min = cl_params.get('change_flashes_min')
+    _cf_max = cl_params.get('change_flashes_max')
+    flash_based_windows = _cf_min is not None and _cf_max is not None
+    change_flashes_min = _cf_min if _cf_min is not None else 4
+    change_flashes_max = _cf_max if _cf_max is not None else 12
 
     def get_trial_event_time(trial, event_name, use_visual=False):
         ts_array = stim_ts_visual if use_visual else stim_ts_behavioral
@@ -760,8 +823,10 @@ def build_intervals_table(pkl, ts, events_df):
                     change_time = stim_ts_visual[ev_frame]
                 break
 
-        # Image names
+        # Stimulus identity (image name for image sessions, gratings_<ori>
+        # label for gratings sessions) + numeric orientation when applicable.
         initial_image = None
+        initial_orientation = float('nan')
         start_frame_trial = None
         for ev in trial_events:
             if ev[0] == 'trial_start':
@@ -770,16 +835,22 @@ def build_intervals_table(pkl, ts, events_df):
         if start_frame_trial is not None:
             for sl_idx in range(len(set_log) - 1, -1, -1):
                 if (set_log[sl_idx][3] <= start_frame_trial
-                        and set_log[sl_idx][0].lower() == 'image'):
-                    initial_image = set_log[sl_idx][1]
+                        and set_log[sl_idx][0].lower() == identity_attr):
+                    initial_image, initial_orientation = stim_identity(
+                        stim_type, set_log[sl_idx][1])
                     break
 
         change_image = None
+        change_orientation = float('nan')
         if stimulus_changes:
-            change_image = (stimulus_changes[0][1][1]
-                            if len(stimulus_changes[0]) > 1 else None)
+            raw_change = (stimulus_changes[0][1][1]
+                          if len(stimulus_changes[0]) > 1 else None)
+            if raw_change is not None:
+                change_image, change_orientation = stim_identity(
+                    stim_type, raw_change)
         if change_image is None:
             change_image = initial_image
+            change_orientation = initial_orientation
 
         # Rewards
         reward_time = None
@@ -814,6 +885,8 @@ def build_intervals_table(pkl, ts, events_df):
             'change_frame': change_frame,
             'initial_image_name': initial_image,
             'change_image_name': change_image,
+            'initial_orientation': initial_orientation,
+            'change_orientation': change_orientation,
             'reward_time': reward_time,
             'reward_volume': reward_volume,
             'response_time': response_time,
@@ -834,41 +907,43 @@ def build_intervals_table(pkl, ts, events_df):
 
         mask = (onset_times_vis >= trial_start) & (onset_times_vis <= trial_stop)
         trial_onset_times = onset_times_vis[mask]
-
-        if len(trial_onset_times) < change_flashes_min:
-            continue
-
-        # Change window starts at the change_flashes_min-th flash onset
-        cw_start_time = trial_onset_times[change_flashes_min - 1]
-
         change_time = trial_row['change_time']
-        if change_time is not None:
-            cw_end_time = change_time
-        elif trial_row['aborted']:
-            cw_end_time = trial_row['stop_time']
-        elif len(trial_onset_times) > change_flashes_max:
-            cw_end_time = trial_onset_times[change_flashes_max - 1]
-        else:
-            cw_end_time = trial_onset_times[-1]
 
-        if cw_start_time < cw_end_time:
-            window_intervals.append({
-                'interval_type': 'change_window',
-                'start_time': cw_start_time,
-                'stop_time': cw_end_time,
-                'trials_id': trial_id,
-            })
+        # Change window starts at the change_flashes_min-th flash onset. Only
+        # meaningful for flashed paradigms with enough flashes in the trial.
+        if flash_based_windows and len(trial_onset_times) >= change_flashes_min:
+            cw_start_time = trial_onset_times[change_flashes_min - 1]
 
-        # Response window: only for trials with a change event
+            if change_time is not None:
+                cw_end_time = change_time
+            elif trial_row['aborted']:
+                cw_end_time = trial_row['stop_time']
+            elif len(trial_onset_times) > change_flashes_max:
+                cw_end_time = trial_onset_times[change_flashes_max - 1]
+            else:
+                cw_end_time = trial_onset_times[-1]
+
+            if cw_start_time < cw_end_time:
+                window_intervals.append({
+                    'interval_type': 'change_window',
+                    'start_time': cw_start_time,
+                    'stop_time': cw_end_time,
+                    'trials_id': trial_id,
+                })
+
+        # Response window: only for trials with a change event and a
+        # non-degenerate window (skip zero-width windows, e.g. response_window
+        # = [0, 0] in early autoreward training).
         if change_time is not None:
             rw_start_time = change_time + response_window[0]
             rw_end_time = change_time + response_window[1]
-            window_intervals.append({
-                'interval_type': 'response_window',
-                'start_time': rw_start_time,
-                'stop_time': rw_end_time,
-                'trials_id': trial_id,
-            })
+            if rw_end_time > rw_start_time:
+                window_intervals.append({
+                    'interval_type': 'response_window',
+                    'start_time': rw_start_time,
+                    'stop_time': rw_end_time,
+                    'trials_id': trial_id,
+                })
 
     all_intervals = intervals + trial_intervals + window_intervals
     intervals_df = pd.DataFrame(all_intervals)

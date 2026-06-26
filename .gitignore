@@ -154,3 +154,4 @@ dmypy.json
 
 # Project-specific: regenerated on import by ndx_change_detection_task/__init__.py
 code/ndx_change_detection_task/_specs/
+.vscode
