@@ -1,20 +1,21 @@
 """Capsule entry point.
 
-Discovers every session under /data and packages each **change-detection**
-session into a HED-annotated NWB file + BIDS-style events sidecar JSON written
-to /results.
+Discovers every session under /data and packages supported session types into
+HED-annotated NWB files + BIDS-style events sidecar JSON written to /results.
 
 Two camstim file-naming conventions are supported for the same kind of session:
   - ``<id>_stim.pkl`` paired with ``<id>_sync.h5`` (older), and
   - ``<id>.pkl``      paired with ``<id>_<timestamp>.h5`` (newer).
 
-Not every pkl under /data is a change-detection session — passive **SweepStim**
-sessions (sync_square / foraging items, a top-level ``stimuli`` *list*, no
-behavior ``trial_log``) live alongside them and are NOT handled by this
-pipeline. Each session is classified by structure before packaging:
-change-detection sessions are packaged; SweepStim / unrecognized sessions are
-logged and skipped. A session that errors during packaging is also logged and
-skipped, so nothing aborts the whole batch.
+Not every pkl under /data is the same task type. Sessions are classified by
+structure before packaging:
+- change-detection sessions are packaged via ``package_to_nwb.py``;
+- passive SweepStim sessions are packaged via the standalone
+    ``sweepstim_packaging/`` module;
+- unknown structures are logged and skipped.
+
+Any session that errors during packaging is logged and skipped, so nothing
+aborts the whole batch.
 
 Output naming: <id>.nwb and <id>.events.json, where <id> is the numeric session
 id (the pkl filename with any trailing "_stim" and the ".pkl" removed).
@@ -27,6 +28,7 @@ import pickle
 from pathlib import Path
 
 from package_to_nwb import package_to_nwb
+from sweepstim_packaging import package_sweepstim_to_nwb
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "/results"))
@@ -71,7 +73,8 @@ def classify_session(data: dict) -> tuple[str, str]:
 
     Returns ``(kind, detail)`` where ``kind`` is one of:
       - ``"change_detection"`` — package it.
-      - ``"sweepstim"``        — passive SweepStim session; skip (not supported).
+      - ``"sweepstim"``        — passive SweepStim session; package via
+        standalone ``sweepstim_packaging`` module.
       - ``"unknown"``          — neither signature; skip and report loudly.
     """
     items = data.get("items") or {}
@@ -108,7 +111,7 @@ def main() -> None:
 
     logging.info("Found %d candidate session(s) under %s.", len(sessions), DATA_DIR)
 
-    packaged, no_sync, skipped_type, failed = [], [], [], []
+    packaged_cd, packaged_sweepstim, no_sync, skipped_type, failed = [], [], [], [], []
     for sid, pkl in sorted(sessions.items()):
         sync = find_sync(pkl, sid)
         if sync is None:
@@ -128,30 +131,34 @@ def main() -> None:
             failed.append(sid)
             continue
 
-        if kind != "change_detection":
-            logging.warning("Skipping session %s — not a change-detection session "
-                            "(%s: %s).", sid, kind, detail)
-            skipped_type.append((sid, kind))
-            continue
-
         out = RESULTS_DIR / f"{sid}.nwb"
         logging.info("=" * 62)
-        logging.info("Packaging change-detection session %s (%s)", sid, detail)
+        logging.info("Packaging session %s (%s: %s)", sid, kind, detail)
         logging.info("  pkl  : %s", pkl)
         logging.info("  sync : %s", sync)
         logging.info("  out  : %s", out)
         logging.info("=" * 62)
         try:
-            package_to_nwb(str(pkl), str(sync), str(out))
-            packaged.append(sid)
+            if kind == "change_detection":
+                package_to_nwb(str(pkl), str(sync), str(out))
+                packaged_cd.append(sid)
+            elif kind == "sweepstim":
+                package_sweepstim_to_nwb(str(pkl), str(sync), str(out))
+                packaged_sweepstim.append(sid)
+            else:
+                logging.warning("Skipping session %s — unsupported type "
+                                "(%s: %s).", sid, kind, detail)
+                skipped_type.append((sid, kind))
         except Exception:
             logging.exception("FAILED to package session %s — skipping.", sid)
             failed.append(sid)
 
     logging.info("=" * 62)
-    logging.info("Done. %d packaged, %d skipped (unsupported type), "
-                 "%d skipped (no sync), %d failed.",
-                 len(packaged), len(skipped_type), len(no_sync), len(failed))
+    packaged_total = len(packaged_cd) + len(packaged_sweepstim)
+    logging.info("Done. %d packaged (%d change-detection, %d sweepstim), "
+                 "%d skipped (unsupported type), %d skipped (no sync), %d failed.",
+                 packaged_total, len(packaged_cd), len(packaged_sweepstim),
+                 len(skipped_type), len(no_sync), len(failed))
     if skipped_type:
         logging.info("Skipped (unsupported type): %s",
                      ", ".join(f"{s} [{k}]" for s, k in skipped_type))
