@@ -13,6 +13,11 @@ Loops over every ``*.nwb`` file under a results directory and builds:
    identifying metadata plus every field of the ``ChangeDetectionTaskParameters``
    container stored on each NWB.
 
+When called in-process by ``run_capsule.py`` (``sidecar=True``), it also writes
+a per-session ``<id>.metadata.json`` next to each NWB and mirrors the two CSVs
+into the results directory, so a captured Code Ocean result data asset is
+self-describing.
+
 Usage
 -----
     python summarize_sessions.py [RESULTS_DIR] [OUT_DIR]
@@ -25,7 +30,9 @@ tables actually show up in the VS Code file explorer (``/results`` and
 """
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 import sys
 import warnings
@@ -41,6 +48,11 @@ from ndx_events import EventsTable
 from pynwb import NWBHDF5IO
 
 logger = logging.getLogger("summarize_sessions")
+
+# Default output dir: the workspace `summaries/` folder — tracked + not
+# gitignored, so the CSVs are visible in the file explorer (unlike /results and
+# /scratch). Computed once here so both the CLI and in-process callers agree.
+DEFAULT_OUT_DIR = Path(__file__).resolve().parent.parent / "summaries"
 
 # Lick classifications we expect (from build_events_and_intervals); any extra
 # value found in a file is added as its own column automatically.
@@ -267,6 +279,36 @@ def _task_parameter_fields(params) -> dict:
     return out
 
 
+def _json_safe(obj):
+    """Recursively make a value JSON-serializable: numpy scalars -> Python, and
+    non-finite floats (NaN/inf) -> None, so the sidecar is valid, portable JSON."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, np.generic):
+        obj = obj.item()
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj
+
+
+def _write_sidecar(path: Path, metrics: dict, task_row: dict) -> Path:
+    """Write a per-session ``<id>.metadata.json`` next to its NWB.
+
+    Bundles the identifying metadata + behavioral metrics (``metrics``) with the
+    task parameters (the fields of ``task_row`` not already in ``metrics``) so a
+    captured result data asset is self-describing without opening the NWB.
+    """
+    sidecar = dict(metrics)
+    sidecar["task_parameters"] = {k: v for k, v in task_row.items()
+                                  if k not in metrics}
+    sc_path = path.parent / f"{path.stem}.metadata.json"
+    with open(sc_path, "w") as f:
+        json.dump(_json_safe(sidecar), f, indent=2)
+    return sc_path
+
+
 def summarize_file(path: Path, asset_map: dict[str, str] | None = None) -> tuple[dict, dict]:
     """Return (metrics_row, task_params_row) for one NWB file."""
     session_id = path.stem
@@ -287,21 +329,30 @@ def summarize_file(path: Path, asset_map: dict[str, str] | None = None) -> tuple
     return metrics, task_row
 
 
-def main(argv: list[str]) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    warnings.filterwarnings("ignore")
+def summarize_results(results_dir: Path | str,
+                      out_dir: Path | str | None = None,
+                      sidecar: bool = False,
+                      mirror_csv_dir: Path | str | None = None) -> tuple[Path, Path] | None:
+    """Build the two summary CSVs from every ``*.nwb`` under ``results_dir``.
 
-    results_dir = Path(argv[1]) if len(argv) > 1 else Path(
-        os.environ.get("RESULTS_DIR", "/results"))
-    # Default to the workspace `summaries/` dir: tracked + not gitignored, so
-    # the CSVs are visible in the file explorer (unlike /results and /scratch).
-    default_out = Path(__file__).resolve().parent.parent / "summaries"
-    out_dir = Path(argv[2]) if len(argv) > 2 else default_out
-    out_dir.mkdir(parents=True, exist_ok=True)
+    Returns ``(metrics_path, task_path)`` on success, or ``None`` when there are
+    no NWBs / none could be summarized. Unlike a CLI entry point this never
+    raises on empty input, so callers (e.g. ``run_capsule.py``) can invoke it
+    in-process without a summary hiccup aborting the packaging run.
+
+    ``sidecar``: also write a per-session ``<id>.metadata.json`` next to each
+    NWB, so a captured result data asset is self-describing.
+    ``mirror_csv_dir``: also write copies of the two CSVs into this directory
+    (e.g. ``/results``) so they ship inside the captured asset.
+    """
+    results_dir = Path(results_dir)
+    out_dir = Path(out_dir) if out_dir is not None else DEFAULT_OUT_DIR
 
     nwb_files = sorted(results_dir.rglob("*.nwb"))
     if not nwb_files:
-        raise SystemExit(f"ERROR: no *.nwb files found under {results_dir}")
+        logger.warning("No *.nwb files found under %s — nothing to summarize.",
+                       results_dir)
+        return None
     logger.info("Found %d NWB file(s) under %s", len(nwb_files), results_dir)
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
@@ -315,13 +366,19 @@ def main(argv: list[str]) -> None:
             m, t = summarize_file(path, asset_map)
             metric_rows.append(m)
             task_rows.append(t)
-            logger.info("Summarized %s", path.name)
+            if sidecar:
+                sc = _write_sidecar(path, m, t)
+                logger.info("Summarized %s (+ %s)", path.name, sc.name)
+            else:
+                logger.info("Summarized %s", path.name)
         except Exception:
             logger.exception("FAILED to summarize %s — skipping.", path.name)
 
     if not metric_rows:
-        raise SystemExit("ERROR: no NWB files could be summarized.")
+        logger.warning("No NWB files could be summarized under %s.", results_dir)
+        return None
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     metrics_df = pd.DataFrame(metric_rows).sort_values(
         ["subject_id", "acquisition_date"]).reset_index(drop=True)
     task_df = pd.DataFrame(task_rows).sort_values(
@@ -336,6 +393,30 @@ def main(argv: list[str]) -> None:
                 metrics_path, *metrics_df.shape)
     logger.info("Wrote %s  (%d sessions x %d columns)",
                 task_path, *task_df.shape)
+
+    # Mirror the CSVs into another dir (e.g. /results) so they're captured as
+    # part of the result data asset. Skip if it's the same dir we just wrote.
+    if mirror_csv_dir is not None:
+        mirror_csv_dir = Path(mirror_csv_dir)
+        if mirror_csv_dir.resolve() != out_dir.resolve():
+            mirror_csv_dir.mkdir(parents=True, exist_ok=True)
+            metrics_df.to_csv(mirror_csv_dir / metrics_path.name, index=False)
+            task_df.to_csv(mirror_csv_dir / task_path.name, index=False)
+            logger.info("Mirrored summary CSVs into %s", mirror_csv_dir)
+
+    return metrics_path, task_path
+
+
+def main(argv: list[str]) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    warnings.filterwarnings("ignore")
+
+    results_dir = Path(argv[1]) if len(argv) > 1 else Path(
+        os.environ.get("RESULTS_DIR", "/results"))
+    out_dir = Path(argv[2]) if len(argv) > 2 else None
+
+    if summarize_results(results_dir, out_dir) is None:
+        raise SystemExit(f"ERROR: no NWB files could be summarized under {results_dir}.")
 
 
 if __name__ == "__main__":

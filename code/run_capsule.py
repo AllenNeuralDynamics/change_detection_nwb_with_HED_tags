@@ -28,6 +28,7 @@ import pickle
 from pathlib import Path
 
 from package_to_nwb import package_to_nwb
+from summarize_sessions import summarize_results
 from sweepstim_packaging import package_sweepstim_to_nwb
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -167,6 +168,20 @@ def main() -> None:
     if failed:
         logging.warning("Failed to package: %s", ", ".join(failed))
     logging.info("Results in %s", RESULTS_DIR)
+
+    # Build the session-summary tables (session_metrics.csv +
+    # session_task_parameters.csv) from the NWBs we just wrote, mirroring
+    # summarize_sessions.py. Also drop a per-session <id>.metadata.json next to
+    # each NWB and copy the CSVs into /results, so a captured result data asset
+    # is self-describing. A summary hiccup must not fail the packaging run.
+    if packaged_total:
+        try:
+            summarize_results(RESULTS_DIR, sidecar=True, mirror_csv_dir=RESULTS_DIR)
+        except Exception:
+            logging.exception("Session summary step failed "
+                              "(NWBs were still written to %s).", RESULTS_DIR)
+    else:
+        logging.info("No NWBs packaged — skipping session summary.")
 
 
 if __name__ == "__main__":

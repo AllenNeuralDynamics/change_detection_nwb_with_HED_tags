@@ -102,54 +102,148 @@ def build_sweepstim_nwbfile(pkl: dict, metadata: dict) -> NdxEventsNWBFile:
     return nwb
 
 
-def _iter_sweep_rows(stimuli: list[dict], stim_ts_visual: np.ndarray):
+def _block_rows_from_frame_list(stim_obj: dict, block_idx: int,
+                                stim_ts_visual: np.ndarray) -> list[dict]:
+    """Build per-presentation rows for one block from camstim ``frame_list``.
+
+    ``frame_list`` is indexed by *global* display frame (60 Hz from session
+    start, so it aligns 1:1 with the vsync timebase in ``stim_ts_visual``) and
+    its value is the on-screen identifier — a grating condition index, or a
+    movie frame index — with ``-1`` marking frames where this block is not on
+    screen. This is the authoritative record of what was displayed *when*, and
+    it already respects each block's ``display_sequence`` windows (the gaps show
+    up as ``-1``), so no local→global frame conversion is needed.
+
+    Each maximal run of a constant value ``>= 0`` is one presentation: gratings
+    hold a condition for the whole sweep (e.g. 120 frames = 2 s, separated by
+    blank ``-1`` gaps); movies show each frame for 2 display frames (30 Hz).
+    """
     n_frames = len(stim_ts_visual)
+    clip = _clip_name(stim_obj, block_idx)
+    clip_label = _hed_safe_label(clip)
+    hed = f"Sensory-event, Visual-presentation, (Movie, Label/{clip_label})"
+
+    fl = np.asarray(_as_sequence(stim_obj.get("frame_list")))
+    if fl.size == 0:
+        return []
+
+    # Run boundaries: a run spans global frames [start, stop) with fl constant.
+    change = np.flatnonzero(np.diff(fl)) + 1
+    starts = np.concatenate(([0], change))
+    stops = np.concatenate((change, [fl.size]))
+
     rows = []
+    repeat_counter: dict[int, int] = {}
+    for start_frame, stop_frame in zip(starts.tolist(), stops.tolist()):
+        value = int(fl[start_frame])
+        if value < 0:            # blank / block not on screen
+            continue
+        if start_frame >= n_frames:
+            continue
+        # Offset = onset of the next display frame after the run (contiguous).
+        stop_frame = min(stop_frame, n_frames - 1)
+        start_time = float(stim_ts_visual[start_frame])
+        stop_time = float(stim_ts_visual[stop_frame])
+        if stop_time <= start_time:
+            stop_time = start_time + (1.0 / 60.0)
 
+        repeat = repeat_counter.get(value, 0)
+        repeat_counter[value] = repeat + 1
+        rows.append({
+            "start_time": start_time,
+            "stop_time": stop_time,
+            "start_frame": int(start_frame),
+            "stop_frame": int(stop_frame),
+            "movie_name": clip,
+            "movie_frame_index": value,
+            "movie_repeat": repeat,
+            "stim_block": int(block_idx),
+            "epoch_name": "passive_viewing",
+            "HED": hed,
+        })
+    return rows
+
+
+def _block_rows_from_sweep_frames(stim_obj: dict, block_idx: int,
+                                  stim_ts_visual: np.ndarray) -> list[dict]:
+    """Fallback for blocks with no ``frame_list``.
+
+    Treats ``sweep_frames`` as global vsync indices. This is only correct for a
+    single-block session that starts at frame 0; for multi-block/interleaved
+    sessions it mis-places frames, so it is used only when ``frame_list`` is
+    absent and a warning is logged by the caller.
+    """
+    n_frames = len(stim_ts_visual)
+    clip = _clip_name(stim_obj, block_idx)
+    clip_label = _hed_safe_label(clip)
+    hed = f"Sensory-event, Visual-presentation, (Movie, Label/{clip_label})"
+    sweeps = _as_sequence(stim_obj.get("sweep_order"))
+    sweep_frames = _as_sequence(stim_obj.get("sweep_frames"))
+    n_sweeps = min(len(sweeps), len(sweep_frames))
+    runs = int(stim_obj.get("runs") or 1)
+    sweeps_per_run = max(1, n_sweeps // runs) if n_sweeps else 1
+
+    rows = []
+    for k in range(n_sweeps):
+        sf, ef = sweep_frames[k]
+        sf = int(sf)
+        ef = int(ef)
+        if sf >= n_frames:
+            continue
+        if ef <= sf:
+            ef = sf + 1
+        stop_frame = min(ef, n_frames - 1)
+        start_time = float(stim_ts_visual[sf])
+        stop_time = float(stim_ts_visual[stop_frame])
+        if stop_time <= start_time:
+            stop_time = start_time + (1.0 / 60.0)
+        rows.append({
+            "start_time": start_time,
+            "stop_time": stop_time,
+            "start_frame": sf,
+            "stop_frame": stop_frame,
+            "movie_name": clip,
+            "movie_frame_index": int(sweeps[k]) if sweeps[k] is not None else -1,
+            "movie_repeat": int(k // sweeps_per_run),
+            "stim_block": int(block_idx),
+            "epoch_name": "passive_viewing",
+            "HED": hed,
+        })
+    return rows
+
+
+def _iter_sweep_rows(stimuli: list[dict], stim_ts_visual: np.ndarray):
+    rows = []
     for block_idx, stim_obj in enumerate(stimuli):
-        clip = _clip_name(stim_obj, block_idx)
-        clip_label = _hed_safe_label(clip)
-        sweeps = _as_sequence(stim_obj.get("sweep_order"))
-        sweep_frames = _as_sequence(stim_obj.get("sweep_frames"))
-        n_sweeps = min(len(sweeps), len(sweep_frames))
-        runs = int(stim_obj.get("runs") or 1)
-        sweeps_per_run = max(1, n_sweeps // runs) if n_sweeps else 1
-        hed = f"Sensory-event, Visual-presentation, (Movie, Label/{clip_label})"
-
-        for k in range(n_sweeps):
-            sf, ef = sweep_frames[k]
-            sf = int(sf)
-            ef = int(ef)
-            if sf >= n_frames:
-                continue
-            if ef <= sf:
-                ef = sf + 1
-            stop_frame = min(ef, n_frames - 1)
-            start_time = float(stim_ts_visual[sf])
-            stop_time = float(stim_ts_visual[stop_frame])
-            if stop_time <= start_time:
-                stop_time = start_time + (1.0 / 60.0)
-
-            rows.append({
-                "start_time": start_time,
-                "stop_time": stop_time,
-                "start_frame": sf,
-                "stop_frame": stop_frame,
-                "movie_name": clip,
-                "movie_frame_index": int(sweeps[k]) if sweeps[k] is not None else -1,
-                "movie_repeat": int(k // sweeps_per_run),
-                "stim_block": int(block_idx),
-                "epoch_name": "passive_viewing",
-                "HED": hed,
-            })
+        frame_list = stim_obj.get("frame_list")
+        if frame_list is not None and len(frame_list) > 0:
+            rows.extend(_block_rows_from_frame_list(stim_obj, block_idx, stim_ts_visual))
+        else:
+            logger.warning(
+                "Block %d (%s) has no frame_list; falling back to raw "
+                "sweep_frames — timing may be wrong for multi-block sessions.",
+                block_idx, _clip_name(stim_obj, block_idx))
+            rows.extend(_block_rows_from_sweep_frames(stim_obj, block_idx, stim_ts_visual))
 
     rows.sort(key=lambda r: r["start_time"])
     return rows
 
 
-def _build_epoch_list(stimuli: list[dict], rows: list[dict], pkl: dict) -> list[dict]:
-    epochs = []
+def _build_epoch_list(stimuli: list[dict], rows: list[dict], pkl: dict,
+                      stim_ts_visual: np.ndarray, fps: float) -> list[dict]:
+    # display_sequence windows are in seconds on the stimulus clock (session
+    # start = 0). Convert them to the sync/vsync timebase used by the
+    # presentations (start = stim_ts_visual[0]) so epochs and frames line up:
+    # seconds -> global display frame (* fps) -> vsync time.
+    n_frames = len(stim_ts_visual)
+    session_start = float(stim_ts_visual[0]) if n_frames else 0.0
 
+    def sec_to_time(sec) -> float:
+        frame = int(round(float(sec) * fps))
+        frame = max(0, min(frame, n_frames - 1))
+        return float(stim_ts_visual[frame])
+
+    epochs = []
     for block_idx, stim_obj in enumerate(stimuli):
         clip = _clip_name(stim_obj, block_idx)
         seq = _as_sequence(stim_obj.get("display_sequence"))
@@ -160,7 +254,7 @@ def _build_epoch_list(stimuli: list[dict], rows: list[dict], pkl: dict) -> list[
                 window = window.tolist()
             if not isinstance(window, (list, tuple)) or len(window) != 2:
                 continue
-            start, stop = float(window[0]), float(window[1])
+            start, stop = sec_to_time(window[0]), sec_to_time(window[1])
             if stop <= start:
                 continue
             epochs.append({
@@ -188,13 +282,12 @@ def _build_epoch_list(stimuli: list[dict], rows: list[dict], pkl: dict) -> list[
     epochs.sort(key=lambda e: e["start"])
 
     session_end = max(
-        float(pkl.get("session_duration", 0.0) or 0.0),
         float(rows[-1]["stop_time"]) if rows else 0.0,
         max((float(e["stop"]) for e in epochs), default=0.0),
     )
 
     with_spont = []
-    prev = 0.0
+    prev = session_start
     for ep in epochs:
         if ep["start"] > prev:
             with_spont.append({
@@ -355,8 +448,9 @@ def package_sweepstim_to_nwb(
     if not isinstance(stimuli, list) or not stimuli:
         raise ValueError("SweepStim packaging requires a non-empty top-level stimuli list")
 
+    fps = float(pkl.get("fps") or (stimuli[0].get("fps") if stimuli else None) or 60.0)
     rows = _iter_sweep_rows(stimuli, ts["stim_ts_visual"])
-    epoch_list = _build_epoch_list(stimuli, rows, pkl)
+    epoch_list = _build_epoch_list(stimuli, rows, pkl, ts["stim_ts_visual"], fps)
 
     nwb = build_sweepstim_nwbfile(pkl, metadata)
     nwb.add_lab_meta_data(HedLabMetaData(hed_schema_version=HED_SCHEMA_VERSION))
