@@ -1,0 +1,348 @@
+--- /tmp/orig/change_detection_nwb_with_HED_tags-main/code/run_capsule.py	2026-07-01 10:19:38
++++ /Users/marinag/.claude-science/orgs/65ac7848-30bf-4ecc-af5a-d57fe2c2ad85/workspaces/b69d5062-1c53-46e8-8c6a-2e31a42ae491/cd_nwb_src/change_detection_nwb_with_HED_tags-main/code/run_capsule.py	2026-07-06 17:44:26
+@@ -22,6 +22,7 @@
+ """
+ from __future__ import annotations
+ 
++import datetime
+ import logging
+ import os
+ import pickle
+@@ -30,11 +31,39 @@
+ from package_to_nwb import package_to_nwb
+ from summarize_sessions import summarize_results
+ from sweepstim_packaging import package_sweepstim_to_nwb
++from aind_metadata import (
++    find_primary_asset_dir,
++    load_primary_metadata,
++    subject_fields_for_nwb,
++    build_derived_name,
++    write_derived_metadata,
++    PROCESS_LABEL,
++)
+ 
+ DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+ RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "/results"))
+ 
++# NWB filename (modality token) inside each derived asset. AIND convention:
++# <modality>.nwb.zarr at the asset root.
++NWB_FILENAME = "behavior.nwb.zarr"
+ 
++
++def _capsule_code_version() -> str:
++    """Best-effort capsule/code version for processing provenance.
++
++    Prefers the git commit of the checked-out code; falls back to an env var or
++    'unknown'. Never raises — provenance is nice-to-have, not run-critical.
++    """
++    import subprocess
++    try:
++        return subprocess.check_output(
++            ["git", "rev-parse", "--short", "HEAD"],
++            cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL,
++        ).decode().strip() or "unknown"
++    except Exception:
++        return os.environ.get("CODE_VERSION", "unknown")
++
++
+ def discover_sessions(data_dir: Path) -> dict[str, Path]:
+     """Map session id -> stimulus pkl path, across both naming conventions.
+ 
+@@ -132,16 +161,54 @@
+             failed.append(sid)
+             continue
+ 
+-        out = RESULTS_DIR / f"{sid}.nwb"
++        # ── Locate the primary (raw) asset this session came from, and load its
++        #    AIND core metadata JSONs. The behavior NWB is a *derived* asset:
++        #    named <primary-asset-name>_<PROCESS_LABEL>_<date>_<time>, with the
++        #    NWB-Zarr + regenerated data_description/processing + inherited
++        #    subject/procedures/session/rig at its root.
++        primary_dir = find_primary_asset_dir(pkl, DATA_DIR)
++        primary_meta = load_primary_metadata(primary_dir)
++        primary_name = primary_dir.name if primary_dir else None
++
++        if primary_name and "data_description.json" in primary_meta:
++            creation_time = datetime.datetime.now().astimezone()
++            out_dir = RESULTS_DIR / build_derived_name(primary_name, creation_time)
++        else:
++            # Fallback: no identifiable primary asset (e.g. local test data
++            # without AIND metadata). Keep a session-id folder so the run still
++            # produces output; derived metadata is skipped for this session.
++            logging.warning(
++                "Session %s: no primary AIND asset/data_description found under "
++                "%s — writing NWB without derived metadata.", sid, primary_dir)
++            creation_time = datetime.datetime.now().astimezone()
++            out_dir = RESULTS_DIR / f"{sid}_{PROCESS_LABEL}"
++
++        out_dir.mkdir(parents=True, exist_ok=True)
++        out = out_dir / NWB_FILENAME
++
+         logging.info("=" * 62)
+         logging.info("Packaging session %s (%s: %s)", sid, kind, detail)
+-        logging.info("  pkl  : %s", pkl)
+-        logging.info("  sync : %s", sync)
+-        logging.info("  out  : %s", out)
++        logging.info("  pkl     : %s", pkl)
++        logging.info("  sync    : %s", sync)
++        logging.info("  primary : %s", primary_name)
++        logging.info("  out     : %s", out)
+         logging.info("=" * 62)
+         try:
++            # Thread AIND subject metadata (sex/genotype/age/strain/dob/species)
++            # from the primary subject.json into the NWB itself.
++            start_dt = None
++            try:
++                with open(pkl, "rb") as f:
++                    _d = pickle.load(f, encoding="latin1")
++                start_dt = _d.get("start_time")
++                del _d
++            except Exception:
++                pass
++            nwb_meta = subject_fields_for_nwb(
++                primary_meta, start_dt or creation_time)
++
+             if kind == "change_detection":
+-                package_to_nwb(str(pkl), str(sync), str(out))
++                package_to_nwb(str(pkl), str(sync), str(out), metadata=nwb_meta)
+                 packaged_cd.append(sid)
+             elif kind == "sweepstim":
+                 package_sweepstim_to_nwb(str(pkl), str(sync), str(out))
+@@ -150,6 +217,31 @@
+                 logging.warning("Skipping session %s — unsupported type "
+                                 "(%s: %s).", sid, kind, detail)
+                 skipped_type.append((sid, kind))
++
++            # ── Write the derived-asset metadata (validated authored files +
++            #    verbatim inherited files) next to the NWB, only for packaged
++            #    sessions that have an identifiable primary asset.
++            if (kind in ("change_detection", "sweepstim")
++                    and primary_name and "data_description.json" in primary_meta):
++                try:
++                    summary = write_derived_metadata(
++                        out_dir=out_dir,
++                        primary_dir=primary_dir,
++                        primary_meta=primary_meta,
++                        primary_name=primary_name,
++                        creation_time=creation_time,
++                        end_time=datetime.datetime.now().astimezone(),
++                        code_version=_capsule_code_version(),
++                        parameters={"monitor_delay_sec": 0.035,
++                                    "hed_schema_version": "8.3.0"},
++                    )
++                    logging.info("  metadata: authored=%s inherited=%s missing=%s",
++                                 summary["authored"], summary["inherited"],
++                                 summary["missing"])
++                except Exception:
++                    logging.exception(
++                        "Derived metadata FAILED for %s — NWB was still "
++                        "written to %s.", sid, out_dir)
+         except Exception:
+             logging.exception("FAILED to package session %s — skipping.", sid)
+             failed.append(sid)
+@@ -169,14 +261,15 @@
+         logging.warning("Failed to package: %s", ", ".join(failed))
+     logging.info("Results in %s", RESULTS_DIR)
+ 
+-    # Build the session-summary tables (session_metrics.csv +
+-    # session_task_parameters.csv) from the NWBs we just wrote, mirroring
+-    # summarize_sessions.py. Also drop a per-session <id>.metadata.json next to
+-    # each NWB and copy the CSVs into /results, so a captured result data asset
+-    # is self-describing. A summary hiccup must not fail the packaging run.
++    # Build the cross-session summary tables (session_metrics.csv +
++    # session_task_parameters.csv) from the NWBs we just wrote, and copy them
++    # into /results as a convenience index across the per-session derived assets.
++    # sidecar=False: the per-session <id>.metadata.json is now superseded by the
++    # AIND schema JSONs (data_description/processing/subject/...) written into
++    # each derived asset. A summary hiccup must not fail the packaging run.
+     if packaged_total:
+         try:
+-            summarize_results(RESULTS_DIR, sidecar=True, mirror_csv_dir=RESULTS_DIR)
++            summarize_results(RESULTS_DIR, sidecar=False, mirror_csv_dir=RESULTS_DIR)
+         except Exception:
+             logging.exception("Session summary step failed "
+                               "(NWBs were still written to %s).", RESULTS_DIR)
+--- /tmp/orig/change_detection_nwb_with_HED_tags-main/code/package_to_nwb.py	2026-07-01 10:19:38
++++ /Users/marinag/.claude-science/orgs/65ac7848-30bf-4ecc-af5a-d57fe2c2ad85/workspaces/b69d5062-1c53-46e8-8c6a-2e31a42ae491/cd_nwb_src/change_detection_nwb_with_HED_tags-main/code/package_to_nwb.py	2026-07-06 17:48:11
+@@ -46,6 +46,7 @@
+ from scipy.stats import zscore as _zscore
+ 
+ from pynwb import NWBHDF5IO, ProcessingModule
++from hdmf_zarr.nwb import NWBZarrIO
+ from pynwb.base import TimeSeries
+ from pynwb.epoch import TimeIntervals
+ from pynwb.file import Subject
+@@ -834,14 +835,32 @@
+ 
+ # ── Builders ───────────────────────────────────────────────────────────
+ def build_subject(pkl: dict, metadata: dict) -> Subject:
+-    """Build a Subject from pkl mouse_id, with optional metadata overrides."""
++    """Build a Subject from pkl mouse_id, with optional metadata overrides.
++
++    When AIND subject metadata is threaded in via ``metadata`` (from the primary
++    asset's subject.json — see aind_metadata.subject_fields_for_nwb), also
++    populate strain and date_of_birth. ``age`` is expected as an ISO-8601
++    duration string (e.g. "P142D"); ``date_of_birth`` as "YYYY-MM-DD".
++    """
+     mouse_id = str(pkl['items']['behavior']['params'].get('mouse_id', 'unknown'))
++    dob = metadata.get('date_of_birth')
++    if isinstance(dob, str):
++        try:
++            dob = datetime.date.fromisoformat(dob)
++        except ValueError:
++            dob = None
++    # pynwb Subject.date_of_birth requires a (tz-aware) datetime, not a date.
++    if isinstance(dob, datetime.date) and not isinstance(dob, datetime.datetime):
++        dob = datetime.datetime(dob.year, dob.month, dob.day,
++                                tzinfo=datetime.timezone.utc)
+     return Subject(
+         subject_id=mouse_id,
+         species=metadata.get('species', 'Mus musculus'),
+         age=metadata.get('age'),
+         sex=metadata.get('sex', 'U'),  # U = unknown
+         genotype=metadata.get('genotype'),
++        strain=metadata.get('strain'),
++        date_of_birth=dob,
+         description=metadata.get('subject_description'),
+     )
+ 
+@@ -1708,13 +1727,17 @@
+     logger.info('Adding running speed (processing/running) + raw encoder traces...')
+     add_running_speed(nwb, pkl, stim_vsync_fall)
+ 
+-    logger.info(f'Writing NWB to {output_path}')
+-    with NWBHDF5IO(str(output_path), 'w') as io:
++    logger.info(f'Writing NWB-Zarr to {output_path}')
++    with NWBZarrIO(str(output_path), 'w') as io:
+         io.write(nwb)
+-    logger.info(f'Done. File size: {output_path.stat().st_size / 1e6:.1f} MB')
++    logger.info(f'Done writing {output_path}')
+ 
+     # Sidecar JSON: column-level Description / Levels / HED, BIDS-style.
+-    sidecar_path = output_path.with_suffix('.events.json')
++    # output_path is e.g. ".../behavior.nwb.zarr" (double extension), so strip
++    # every suffix off the stem rather than using with_suffix (which would only
++    # replace ".zarr" and yield "behavior.nwb.events.json").
++    sidecar_stem = output_path.name.split('.')[0]  # "behavior"
++    sidecar_path = output_path.parent / f'{sidecar_stem}.events.json'
+     with open(sidecar_path, 'w') as f:
+         json.dump(build_events_sidecar(), f, indent=2, ensure_ascii=False)
+     logger.info(f'Wrote sidecar JSON to {sidecar_path}')
+--- /tmp/orig/change_detection_nwb_with_HED_tags-main/code/summarize_sessions.py	2026-07-01 10:19:38
++++ /Users/marinag/.claude-science/orgs/65ac7848-30bf-4ecc-af5a-d57fe2c2ad85/workspaces/b69d5062-1c53-46e8-8c6a-2e31a42ae491/cd_nwb_src/change_detection_nwb_with_HED_tags-main/code/summarize_sessions.py	2026-07-06 17:44:14
+@@ -46,6 +46,7 @@
+ import ndx_change_detection_task  # noqa: F401
+ from ndx_events import EventsTable
+ from pynwb import NWBHDF5IO
++from hdmf_zarr.nwb import NWBZarrIO
+ 
+ logger = logging.getLogger("summarize_sessions")
+ 
+@@ -310,11 +311,27 @@
+ 
+ 
+ def summarize_file(path: Path, asset_map: dict[str, str] | None = None) -> tuple[dict, dict]:
+-    """Return (metrics_row, task_params_row) for one NWB file."""
+-    session_id = path.stem
+-    asset_name = (asset_map or {}).get(session_id)
+-    with NWBHDF5IO(str(path), "r") as io:
++    """Return (metrics_row, task_params_row) for one NWB file.
++
++    Handles both the NWB-Zarr layout (``<derived-asset>/behavior.nwb.zarr``,
++    read with NWBZarrIO) and legacy HDF5 ``<id>.nwb`` files. For a Zarr asset the
++    session_id is taken from the NWB ``identifier`` if numeric, else the derived
++    asset folder name; the asset_name is that folder name.
++    """
++    is_zarr = path.name.endswith(".nwb.zarr") or path.is_dir()
++    if is_zarr:
++        asset_name = path.parent.name  # derived asset folder
++        reader = NWBZarrIO
++        session_id = None  # resolved from the NWB identifier below
++    else:
++        session_id = path.stem
++        asset_name = (asset_map or {}).get(session_id)
++        reader = NWBHDF5IO
++    with reader(str(path), "r") as io:
+         nwb = io.read()
++        if session_id is None:
++            ident_val = str(nwb.identifier) if nwb.identifier else asset_name
++            session_id = ident_val if ident_val.isdigit() else asset_name
+         params = nwb.lab_meta_data.get("task_parameters")
+         ident = _identity(nwb, session_id, params, asset_name)
+ 
+@@ -348,12 +365,23 @@
+     results_dir = Path(results_dir)
+     out_dir = Path(out_dir) if out_dir is not None else DEFAULT_OUT_DIR
+ 
+-    nwb_files = sorted(results_dir.rglob("*.nwb"))
++    # NWB-Zarr assets are directories named "*.nwb.zarr"; legacy HDF5 are "*.nwb"
++    # files. rglob("*.nwb") would also match inside a ".nwb.zarr" tree, so gather
++    # zarr dirs first and exclude anything beneath them.
++    zarr_assets = sorted(p for p in results_dir.rglob("*.nwb.zarr") if p.is_dir())
++    zarr_roots = [z.resolve() for z in zarr_assets]
++    hdf5_files = [
++        p for p in results_dir.rglob("*.nwb")
++        if p.is_file() and not any(
++            str(p.resolve()).startswith(str(z) + os.sep) for z in zarr_roots)
++    ]
++    nwb_files = sorted(zarr_assets + hdf5_files)
+     if not nwb_files:
+-        logger.warning("No *.nwb files found under %s — nothing to summarize.",
+-                       results_dir)
++        logger.warning("No NWB (.nwb.zarr or .nwb) found under %s — nothing to "
++                       "summarize.", results_dir)
+         return None
+-    logger.info("Found %d NWB file(s) under %s", len(nwb_files), results_dir)
++    logger.info("Found %d NWB asset(s) under %s (%d zarr, %d hdf5)",
++                len(nwb_files), results_dir, len(zarr_assets), len(hdf5_files))
+ 
+     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
+     asset_map = build_asset_map(data_dir)
+--- /tmp/orig/change_detection_nwb_with_HED_tags-main/code/sweepstim_packaging/package.py	2026-07-01 10:19:38
++++ /Users/marinag/.claude-science/orgs/65ac7848-30bf-4ecc-af5a-d57fe2c2ad85/workspaces/b69d5062-1c53-46e8-8c6a-2e31a42ae491/cd_nwb_src/change_detection_nwb_with_HED_tags-main/code/sweepstim_packaging/package.py	2026-07-06 17:42:16
+@@ -16,6 +16,7 @@
+ from ndx_events import NdxEventsNWBFile
+ from ndx_hed import HedLabMetaData, HedTags
+ from pynwb import NWBHDF5IO
++from hdmf_zarr.nwb import NWBZarrIO
+ from pynwb.epoch import TimeIntervals
+ from pynwb.file import Subject
+ 
+@@ -464,11 +465,14 @@
+     logger.info("Adding running speed for SweepStim")
+     add_running_speed(nwb, pkl, ts["stim_vsync_fall"])
+ 
+-    logger.info("Writing SweepStim NWB to %s", output_path)
+-    with NWBHDF5IO(str(output_path), "w") as io:
++    logger.info("Writing SweepStim NWB-Zarr to %s", output_path)
++    with NWBZarrIO(str(output_path), "w") as io:
+         io.write(nwb)
+ 
+-    sidecar_path = output_path.with_suffix(".events.json")
++    # output_path may be "<...>/behavior.nwb.zarr" (double extension); strip all
++    # suffixes off the stem rather than with_suffix (which only replaces .zarr).
++    sidecar_stem = output_path.name.split(".")[0]
++    sidecar_path = output_path.parent / f"{sidecar_stem}.events.json"
+     with open(sidecar_path, "w") as f:
+         json.dump(build_sweepstim_sidecar(), f, indent=2, ensure_ascii=False)
+ 
+--- /tmp/orig/change_detection_nwb_with_HED_tags-main/environment/Dockerfile	2026-07-01 10:19:38
++++ /Users/marinag/.claude-science/orgs/65ac7848-30bf-4ecc-af5a-d57fe2c2ad85/workspaces/b69d5062-1c53-46e8-8c6a-2e31a42ae491/cd_nwb_src/change_detection_nwb_with_HED_tags-main/environment/Dockerfile	2026-07-06 17:45:05
+@@ -7,8 +7,10 @@
+ COPY git-ask-pass /
+ 
+ RUN pip install -U --no-cache-dir \
++    aind-data-schema==1.4.0 \
+     h5py==3.16.0 \
+     hdmf==4.3.1 \
++    hdmf-zarr==0.13.0 \
+     hedtools==1.1.0 \
+     matplotlib==3.11.0 \
+     ndx-events==0.4.0 \
+@@ -17,4 +19,5 @@
+     pandas==2.3.3 \
+     pynwb==3.1.3 \
+     scipy==1.15.3 \
+-    six==1.17.0
++    six==1.17.0 \
++    zarr==2.18.3

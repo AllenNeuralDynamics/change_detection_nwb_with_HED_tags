@@ -1676,11 +1676,7 @@ def package_to_nwb(
 
     Returns
     -------
-    dict with keys:
-        output_path : Path to the written NWB-Zarr.
-        monitor_delay_sec : float, the per-session monitor delay measured from
-            the photodiode (seconds) — recorded in the derived processing.json.
-        hed_schema_version : str, the HED schema version stamped into the NWB.
+    Path to the written file.
     """
     metadata = metadata or {}
     output_path = Path(output_path)
@@ -1691,7 +1687,6 @@ def package_to_nwb(
     intervals_df = res['intervals_df']
     task_parameters = res['task_parameters']
     stim_vsync_fall = res['timestamp_data']['stim_vsync_fall']
-    monitor_delay_sec = float(res['timestamp_data']['monitor_delay'])
 
     with open(pkl_path, 'rb') as f:
         pkl = pickle.load(f, encoding='latin1')
@@ -1747,11 +1742,7 @@ def package_to_nwb(
         json.dump(build_events_sidecar(), f, indent=2, ensure_ascii=False)
     logger.info(f'Wrote sidecar JSON to {sidecar_path}')
 
-    return {
-        'output_path': output_path,
-        'monitor_delay_sec': monitor_delay_sec,
-        'hed_schema_version': HED_SCHEMA_VERSION,
-    }
+    return output_path
 
 
 if __name__ == '__main__':

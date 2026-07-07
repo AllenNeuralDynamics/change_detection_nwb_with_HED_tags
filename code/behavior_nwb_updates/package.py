@@ -92,27 +92,12 @@ def build_sweepstim_nwbfile(pkl: dict, metadata: dict) -> NdxEventsNWBFile:
         institution=metadata.get("institution"),
         notes=metadata.get("notes"),
     )
-    # AIND subject metadata threaded in from the primary subject.json (see
-    # aind_metadata.subject_fields_for_nwb): also populate strain + dob. ``age``
-    # is an ISO-8601 duration ("P142D"); ``date_of_birth`` is "YYYY-MM-DD".
-    dob = metadata.get("date_of_birth")
-    if isinstance(dob, str):
-        try:
-            dob = datetime.date.fromisoformat(dob)
-        except ValueError:
-            dob = None
-    # pynwb Subject.date_of_birth requires a (tz-aware) datetime, not a date.
-    if isinstance(dob, datetime.date) and not isinstance(dob, datetime.datetime):
-        dob = datetime.datetime(dob.year, dob.month, dob.day,
-                                tzinfo=datetime.timezone.utc)
     nwb.subject = Subject(
         subject_id=_subject_id_from_pkl(pkl),
         species=metadata.get("species", "Mus musculus"),
         age=metadata.get("age"),
         sex=metadata.get("sex", "U"),
         genotype=metadata.get("genotype"),
-        strain=metadata.get("strain"),
-        date_of_birth=dob,
         description=metadata.get("subject_description"),
     )
     return nwb
@@ -492,10 +477,4 @@ def package_sweepstim_to_nwb(
         json.dump(build_sweepstim_sidecar(), f, indent=2, ensure_ascii=False)
 
     logger.info("Wrote SweepStim sidecar JSON to %s", sidecar_path)
-    # monitor_delay_sec is None: passive SweepStim packaging does not measure a
-    # photodiode monitor delay (unlike change-detection).
-    return {
-        "output_path": output_path,
-        "monitor_delay_sec": None,
-        "hed_schema_version": HED_SCHEMA_VERSION,
-    }
+    return output_path
