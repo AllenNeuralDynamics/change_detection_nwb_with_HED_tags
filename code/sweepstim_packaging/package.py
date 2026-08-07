@@ -28,6 +28,72 @@ from .timestamp_alignment import compute_sweepstim_timestamp_alignment
 logger = logging.getLogger(__name__)
 HED_SCHEMA_VERSION = "8.3.0"
 
+# camstim sweep-dimension name -> snake_case NWB column name. Parametric-sweep
+# stimuli (gratings) store per-condition parameters in ``sweep_table``, with the
+# column order given by ``dimnames``; we surface each dimension as its own column.
+_DIMNAME_COLUMN = {
+    "Contrast": "contrast",
+    "TF": "temporal_frequency",
+    "SF": "spatial_frequency",
+    "Ori": "orientation",
+    "Phase": "phase",
+    "Pos": "position",
+    "Size": "size",
+}
+
+# A movie block's sole "dimension" is which image/frame is shown.
+_MOVIE_DIMNAMES = ["ReplaceImage"]
+
+# Preferred left-to-right order for the stim-type-specific columns, which are
+# only emitted when the session actually uses them (session-driven schema).
+_EXTRA_COLUMN_ORDER = [
+    "orientation", "spatial_frequency", "temporal_frequency", "contrast",
+    "phase", "position", "size",
+    "condition_index", "condition_repeat",
+    "movie_frame_index", "movie_repeat",
+]
+
+_COLUMN_DESCRIPTIONS = {
+    "orientation": "Grating orientation (degrees).",
+    "spatial_frequency": "Grating spatial frequency (cycles/degree).",
+    "temporal_frequency": "Grating temporal frequency (Hz).",
+    "contrast": "Grating contrast (0-1).",
+    "phase": "Grating phase.",
+    "position": "Stimulus position.",
+    "size": "Stimulus size.",
+    "condition_index": "Index into the block's sweep_table (grating condition id).",
+    "condition_repeat": "0-based count of prior presentations of this condition.",
+    "movie_frame_index": "Frame index within movie clip.",
+    "movie_repeat": "Repeat index for this clip (0-based).",
+}
+
+# BIDS-sidecar HED value templates for the optional columns; '#' is the per-row
+# value placeholder. Kept in the safe Label/ extension form used elsewhere.
+_COLUMN_HED_TEMPLATE = {
+    "orientation": "Label/orientation-#",
+    "spatial_frequency": "Label/spatial_frequency-#",
+    "temporal_frequency": "Label/temporal_frequency-#",
+    "contrast": "Label/contrast-#",
+    "phase": "Label/phase-#",
+    "position": "Label/position-#",
+    "size": "Label/size-#",
+    "condition_index": "Label/condition_index-#",
+    "condition_repeat": "Label/condition_repeat-#",
+    "movie_frame_index": "Label/movie_frame_index-#",
+    "movie_repeat": "Label/movie_repeat-#",
+}
+
+# Generic columns present on every presentation row, in output order.
+_BASE_PRESENTATION_SPECS = [
+    ("start_time", "Frame or presentation onset (s)."),
+    ("stop_time", "Frame or presentation offset (s)."),
+    ("epoch_name", "Epoch label: movie clip or grating stimulus name."),
+    ("stim_type", "Stimulus class (e.g. GratingStim, ImageStimNumpyuByte)."),
+    ("stim_block", "Stimulus block index from pkl top-level stimuli list."),
+    ("start_frame", "Vsync frame index at onset."),
+    ("stop_frame", "Vsync frame index at offset."),
+]
+
 
 def _to_datetime(value) -> datetime.datetime:
     if isinstance(value, datetime.datetime):
@@ -57,6 +123,53 @@ def _clip_name(stim_obj: dict, default_index: int) -> str:
     # separators so this resolves the basename on Linux too, then drop the ext.
     base = re.split(r"[\\/]", str(raw))[-1]
     return base.rsplit(".", 1)[0] or base
+
+
+def _dimname_to_column(dimname) -> str:
+    """Map a camstim sweep dimension name to a snake_case column name."""
+    if dimname in _DIMNAME_COLUMN:
+        return _DIMNAME_COLUMN[dimname]
+    norm = re.sub(r"[^a-z0-9]+", "_", str(dimname).lower()).strip("_")
+    return norm or "param"
+
+
+def _is_grating_block(stim_obj: dict) -> bool:
+    """True for a parametric-sweep stimulus (e.g. drifting gratings).
+
+    Such blocks carry a ``sweep_table`` of per-condition parameter tuples and
+    real parameter ``dimnames`` (Contrast/TF/SF/Ori/...), unlike a movie block
+    whose only dimension is ``ReplaceImage`` and which has no sweep_table. The
+    ``frame_list`` value for these blocks is a condition index into sweep_table,
+    not a movie frame index.
+    """
+    st = stim_obj.get("sweep_table")
+    if st is None or len(st) == 0:
+        return False
+    return list(_as_sequence(stim_obj.get("dimnames"))) != _MOVIE_DIMNAMES
+
+
+def _stim_type(stim_obj: dict) -> str:
+    """Best-effort stimulus class from the pickled ``stim`` repr string, e.g.
+    'GratingStim' or 'ImageStimNumpyuByte'."""
+    rep = stim_obj.get("stim")
+    if isinstance(rep, str):
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", rep)
+        if m:
+            return m.group(1)
+    return "GratingStim" if _is_grating_block(stim_obj) else "MovieStim"
+
+
+def _grating_params(sweep_table: list, dim_columns: list, value: int) -> dict:
+    """Resolve a condition index into ``{column: float value}`` via sweep_table."""
+    if not 0 <= value < len(sweep_table):
+        return {}
+    out = {}
+    for col, pv in zip(dim_columns, _as_sequence(sweep_table[value])):
+        try:
+            out[col] = float(pv)
+        except (TypeError, ValueError):
+            out[col] = np.nan
+    return out
 
 
 def _as_sequence(value):
@@ -133,11 +246,25 @@ def _block_rows_from_frame_list(stim_obj: dict, block_idx: int,
     Each maximal run of a constant value ``>= 0`` is one presentation: gratings
     hold a condition for the whole sweep (e.g. 120 frames = 2 s, separated by
     blank ``-1`` gaps); movies show each frame for 2 display frames (30 Hz).
+
+    For a grating block the run's value is a *condition index* into
+    ``sweep_table``; we resolve it through ``dimnames`` into the stimulus
+    parameters (orientation, contrast, spatial/temporal frequency, ...) and emit
+    them as columns. For a movie block the value is the movie frame index.
     """
     n_frames = len(stim_ts_visual)
     clip = _clip_name(stim_obj, block_idx)
     clip_label = _hed_safe_label(clip)
-    hed = f"Sensory-event, Visual-presentation, (Movie, Label/{clip_label})"
+    stim_type = _stim_type(stim_obj)
+    grating = _is_grating_block(stim_obj)
+    if grating:
+        dim_columns = [_dimname_to_column(d)
+                       for d in _as_sequence(stim_obj.get("dimnames"))]
+        sweep_table = list(stim_obj.get("sweep_table") or [])
+        hed = f"Sensory-event, Visual-presentation, (Image, Label/{clip_label})"
+    else:
+        dim_columns, sweep_table = [], []
+        hed = f"Sensory-event, Visual-presentation, (Movie, Label/{clip_label})"
 
     fl = np.asarray(_as_sequence(stim_obj.get("frame_list")))
     if fl.size == 0:
@@ -165,18 +292,24 @@ def _block_rows_from_frame_list(stim_obj: dict, block_idx: int,
 
         repeat = repeat_counter.get(value, 0)
         repeat_counter[value] = repeat + 1
-        rows.append({
+        row = {
             "start_time": start_time,
             "stop_time": stop_time,
             "start_frame": int(start_frame),
             "stop_frame": int(stop_frame),
-            "movie_name": clip,
-            "movie_frame_index": value,
-            "movie_repeat": repeat,
+            "stim_type": stim_type,
             "stim_block": int(block_idx),
-            "epoch_name": "passive_viewing",
+            "epoch_name": clip,
             "HED": hed,
-        })
+        }
+        if grating:
+            row["condition_index"] = value
+            row["condition_repeat"] = repeat
+            row.update(_grating_params(sweep_table, dim_columns, value))
+        else:
+            row["movie_frame_index"] = value
+            row["movie_repeat"] = repeat
+        rows.append(row)
     return rows
 
 
@@ -192,7 +325,16 @@ def _block_rows_from_sweep_frames(stim_obj: dict, block_idx: int,
     n_frames = len(stim_ts_visual)
     clip = _clip_name(stim_obj, block_idx)
     clip_label = _hed_safe_label(clip)
-    hed = f"Sensory-event, Visual-presentation, (Movie, Label/{clip_label})"
+    stim_type = _stim_type(stim_obj)
+    grating = _is_grating_block(stim_obj)
+    if grating:
+        dim_columns = [_dimname_to_column(d)
+                       for d in _as_sequence(stim_obj.get("dimnames"))]
+        sweep_table = list(stim_obj.get("sweep_table") or [])
+        hed = f"Sensory-event, Visual-presentation, (Image, Label/{clip_label})"
+    else:
+        dim_columns, sweep_table = [], []
+        hed = f"Sensory-event, Visual-presentation, (Movie, Label/{clip_label})"
     sweeps = _as_sequence(stim_obj.get("sweep_order"))
     sweep_frames = _as_sequence(stim_obj.get("sweep_frames"))
     n_sweeps = min(len(sweeps), len(sweep_frames))
@@ -200,7 +342,11 @@ def _block_rows_from_sweep_frames(stim_obj: dict, block_idx: int,
     sweeps_per_run = max(1, n_sweeps // runs) if n_sweeps else 1
 
     rows = []
+    repeat_counter: dict[int, int] = {}
     for k in range(n_sweeps):
+        value = int(sweeps[k]) if sweeps[k] is not None else -1
+        if value < 0:            # blank sweep
+            continue
         sf, ef = sweep_frames[k]
         sf = int(sf)
         ef = int(ef)
@@ -213,18 +359,26 @@ def _block_rows_from_sweep_frames(stim_obj: dict, block_idx: int,
         stop_time = float(stim_ts_visual[stop_frame])
         if stop_time <= start_time:
             stop_time = start_time + (1.0 / 60.0)
-        rows.append({
+        repeat = repeat_counter.get(value, 0)
+        repeat_counter[value] = repeat + 1
+        row = {
             "start_time": start_time,
             "stop_time": stop_time,
             "start_frame": sf,
             "stop_frame": stop_frame,
-            "movie_name": clip,
-            "movie_frame_index": int(sweeps[k]) if sweeps[k] is not None else -1,
-            "movie_repeat": int(k // sweeps_per_run),
+            "stim_type": stim_type,
             "stim_block": int(block_idx),
-            "epoch_name": "passive_viewing",
+            "epoch_name": clip,
             "HED": hed,
-        })
+        }
+        if grating:
+            row["condition_index"] = value
+            row["condition_repeat"] = repeat
+            row.update(_grating_params(sweep_table, dim_columns, value))
+        else:
+            row["movie_frame_index"] = value
+            row["movie_repeat"] = int(k // sweeps_per_run)
+        rows.append(row)
     return rows
 
 
@@ -262,6 +416,7 @@ def _build_epoch_list(stimuli: list[dict], rows: list[dict], pkl: dict,
     epochs = []
     for block_idx, stim_obj in enumerate(stimuli):
         clip = _clip_name(stim_obj, block_idx)
+        media = "Image" if _is_grating_block(stim_obj) else "Movie"
         seq = _as_sequence(stim_obj.get("display_sequence"))
         if not seq:
             continue
@@ -280,7 +435,7 @@ def _build_epoch_list(stimuli: list[dict], rows: list[dict], pkl: dict,
                 "HED": (
                     "Experimental-procedure, "
                     "(Task, Label/passive_viewing), "
-                    f"(Movie, Label/{_hed_safe_label(clip)})"
+                    f"({media}, Label/{_hed_safe_label(clip)})"
                 ),
             })
 
@@ -326,39 +481,39 @@ def _build_epoch_list(stimuli: list[dict], rows: list[dict], pkl: dict,
     return with_spont
 
 
+def _presentation_extra_columns(rows: list[dict]) -> list[str]:
+    """Session-driven optional columns: those actually populated by some row,
+    ordered by preference then alphabetically. Movie sessions get
+    movie_frame_index/movie_repeat; grating sessions get the parameter columns;
+    a mixed session gets the union (NaN-filled where a row doesn't use one)."""
+    base = {name for name, _ in _BASE_PRESENTATION_SPECS} | {"HED"}
+    present: set[str] = set()
+    for r in rows:
+        present.update(r.keys())
+    present -= base
+    ordered = [c for c in _EXTRA_COLUMN_ORDER if c in present]
+    ordered += sorted(present - set(_EXTRA_COLUMN_ORDER))
+    return ordered
+
+
 def build_stimulus_presentations_sweepstim(rows: list[dict]) -> TimeIntervals:
+    columns = [
+        VectorData(name=name, description=desc, data=[r[name] for r in rows])
+        for name, desc in _BASE_PRESENTATION_SPECS
+    ]
+    for name in _presentation_extra_columns(rows):
+        columns.append(VectorData(
+            name=name,
+            description=_COLUMN_DESCRIPTIONS.get(name, f"{name} stimulus parameter."),
+            data=[r.get(name, np.nan) for r in rows]))
+    columns.append(HedTags(name="HED",
+                           description="HED tag string for this presentation.",
+                           data=[r["HED"] for r in rows]))
     return TimeIntervals(
         name="stimulus_presentations",
-        description="Per-frame SweepStim movie presentations for passive sessions.",
-        columns=[
-            VectorData(name="start_time", description="Frame onset (s).",
-                       data=[r["start_time"] for r in rows]),
-            VectorData(name="stop_time", description="Frame offset (s).",
-                       data=[r["stop_time"] for r in rows]),
-            VectorData(name="movie_name", description="Movie clip label.",
-                       data=[r["movie_name"] for r in rows]),
-            VectorData(name="movie_frame_index",
-                       description="Frame index within movie clip.",
-                       data=[r["movie_frame_index"] for r in rows]),
-            VectorData(name="movie_repeat",
-                       description="Repeat index for this clip (0-based).",
-                       data=[r["movie_repeat"] for r in rows]),
-            VectorData(name="stim_block",
-                       description="Stimulus block index from pkl top-level stimuli list.",
-                       data=[r["stim_block"] for r in rows]),
-            VectorData(name="start_frame",
-                       description="Vsync frame index at onset.",
-                       data=[r["start_frame"] for r in rows]),
-            VectorData(name="stop_frame",
-                       description="Vsync frame index at offset.",
-                       data=[r["stop_frame"] for r in rows]),
-            VectorData(name="epoch_name",
-                       description="Canonical epoch label.",
-                       data=[r["epoch_name"] for r in rows]),
-            HedTags(name="HED",
-                    description="HED tag string for this movie frame.",
-                    data=[r["HED"] for r in rows]),
-        ],
+        description=("Per-presentation SweepStim stimulus table "
+                     "(movie frames and/or parametric gratings)."),
+        columns=columns,
         id=list(range(len(rows))),
     )
 
@@ -381,7 +536,7 @@ def build_intervals_table_sweepstim(epoch_list: list[dict], rows: list[dict]) ->
             "start_time": row["start_time"],
             "stop_time": row["stop_time"],
             "interval_type": "stimulus_presentation",
-            "label": row["movie_name"],
+            "label": row["epoch_name"],
             "stimulus_presentations_id": sid,
             "HED": row["HED"],
         })
@@ -413,28 +568,36 @@ def build_intervals_table_sweepstim(epoch_list: list[dict], rows: list[dict]) ->
     )
 
 
-def build_sweepstim_sidecar() -> dict:
-    """Build compact sidecar for SweepStim-specific columns."""
-    return {
+def build_sweepstim_sidecar(rows: list[dict]) -> dict:
+    """Build compact BIDS-style sidecar describing the columns actually written.
+
+    Optional (stim-type-specific) columns are included only when the session
+    uses them, matching the session-driven presentations table.
+    """
+    sidecar = {
         "start_time": {"Description": "Frame or interval start time (s).", "HED": "Time-value/# s"},
         "stop_time": {"Description": "Frame or interval stop time (s).", "HED": "Time-value/# s"},
-        "movie_name": {"Description": "Movie clip label."},
-        "movie_frame_index": {"Description": "Frame index within movie clip.", "HED": "Label/movie_frame_index-#"},
-        "movie_repeat": {"Description": "Repeat index within clip.", "HED": "Label/movie_repeat-#"},
+        "epoch_name": {"Description": "Epoch label: movie clip or grating stimulus name."},
+        "stim_type": {"Description": "Stimulus class (e.g. GratingStim, ImageStimNumpyuByte)."},
         "stim_block": {"Description": "Stimulus block index from pkl top-level stimuli list.", "HED": "Label/stim_block-#"},
         "start_frame": {"Description": "Vsync frame at onset.", "HED": "Label/frame-#"},
         "stop_frame": {"Description": "Vsync frame at offset.", "HED": "Label/frame-#"},
-        "interval_type": {
-            "Description": "Type of interval row.",
-            "Levels": {
-                "epoch": "Session-level epoch row.",
-                "stimulus_presentation": "Per-frame movie presentation.",
-            },
-        },
-        "epoch_name": {"Description": "Canonical epoch label."},
-        "HED": {"Description": "Hierarchical Event Descriptor tags for each row."},
-        "hed_defs": {"HED": {"alldefs": ""}},
     }
+    for col in _presentation_extra_columns(rows):
+        entry = {"Description": _COLUMN_DESCRIPTIONS.get(col, f"{col} stimulus parameter.")}
+        if col in _COLUMN_HED_TEMPLATE:
+            entry["HED"] = _COLUMN_HED_TEMPLATE[col]
+        sidecar[col] = entry
+    sidecar["interval_type"] = {
+        "Description": "Type of interval row.",
+        "Levels": {
+            "epoch": "Session-level epoch row.",
+            "stimulus_presentation": "Per-presentation stimulus row.",
+        },
+    }
+    sidecar["HED"] = {"Description": "Hierarchical Event Descriptor tags for each row."}
+    sidecar["hed_defs"] = {"HED": {"alldefs": ""}}
+    return sidecar
 
 
 def package_sweepstim_to_nwb(
@@ -489,7 +652,7 @@ def package_sweepstim_to_nwb(
     sidecar_stem = output_path.name.split(".")[0]
     sidecar_path = output_path.parent / f"{sidecar_stem}.events.json"
     with open(sidecar_path, "w") as f:
-        json.dump(build_sweepstim_sidecar(), f, indent=2, ensure_ascii=False)
+        json.dump(build_sweepstim_sidecar(rows), f, indent=2, ensure_ascii=False)
 
     logger.info("Wrote SweepStim sidecar JSON to %s", sidecar_path)
     # monitor_delay_sec is None: passive SweepStim packaging does not measure a

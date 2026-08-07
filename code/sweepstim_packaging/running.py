@@ -137,7 +137,7 @@ def compute_running_speed(pkl: dict, time: np.ndarray,
 
 
 def add_running_speed(nwb, pkl: dict, stim_vsync_fall: np.ndarray) -> None:
-    """Add processed running speed and raw encoder traces to NWB."""
+    """Add processed running speed and the raw encoder dx trace to NWB."""
     df = compute_running_speed(pkl, stim_vsync_fall)
     timestamps = df.index.values
 
@@ -150,14 +150,6 @@ def add_running_speed(nwb, pkl: dict, stim_vsync_fall: np.ndarray) -> None:
         name="dx", data=df["dx"].values, timestamps=timestamps, unit="cm",
         description="Running-wheel angular change (raw pkl encoder dx).",
     )
-    v_sig_ts = TimeSeries(
-        name="v_sig", data=df["v_sig"].values, timestamps=timestamps, unit="V",
-        description="Raw voltage signal from the running-wheel encoder.",
-    )
-    v_in_ts = TimeSeries(
-        name="v_in", data=df["v_in"].values, timestamps=timestamps, unit="V",
-        description="Theoretical max encoder voltage for normalisation.",
-    )
 
     if "running" in nwb.processing:
         mod = nwb.processing["running"]
@@ -169,5 +161,3 @@ def add_running_speed(nwb, pkl: dict, stim_vsync_fall: np.ndarray) -> None:
         nwb.add_processing_module(mod)
     mod.add_data_interface(speed_ts)
     mod.add_data_interface(dx_ts)
-    nwb.add_acquisition(v_sig_ts)
-    nwb.add_acquisition(v_in_ts)
